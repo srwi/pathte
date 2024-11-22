@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clipboard-win = "4.5"
-windows = { version = "0.48", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+# egui = "0.15"
+eframe = "0.28.1"
+tray-icon = "0.19.2"
+global-hotkey = "0.3"
