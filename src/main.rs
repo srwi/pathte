@@ -1,5 +1,5 @@
 use clipboard_win::{formats, get_clipboard, is_format_avail, set_clipboard, SysResult};
-use eframe::egui;
+use eframe::egui::{self, Window};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -7,6 +7,7 @@ use tray_icon::{
     menu::{Menu, MenuItem},
     TrayIconBuilder,
 };
+use std::sync::mpsc::{Receiver, channel, Sender};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_V,
@@ -34,30 +35,63 @@ impl std::fmt::Display for ClipboardError {
     }
 }
 
+enum BackendToUiCommand {
+    ShowWindow,
+    HideWindow,
+    SelectNext,
+    SelectPrevious,
+}
+
+struct BackendToUiSignal {
+    command: BackendToUiCommand,
+    payload: Option<i32>,
+}
+
+enum UiToBackendSignal {
+    Select,
+    Cancel,
+}
+
+struct UiToBackendCommand {
+    command: BackendToUiCommand,
+    payload: Option<i32>,
+}
+
 struct MyApp {
-    show_window: Arc<Mutex<bool>>,
+    recv_from_backend: Receiver<BackendToUiSignal>,
+    send_to_backend: Sender<BackendToUiSignal>,
+    window_open: bool,
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let window_info = _frame.info().clone();
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        egui::Rgba::TRANSPARENT.to_array()
+    }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Hello, world!");
-            if ui.button("Close").clicked() {
-                *self.show_window.lock().unwrap() = false;
-            }
-        });
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
+
+        if self.recv_from_backend.try_recv().is_ok() {
+            self.window_open = true;
+        }
+
+        Window::new("Pathte")
+            .open(&mut self.window_open)
+            .fade_out(true)
+            .show(ctx, |ui| {
+                if (self.recv_from_backend.try_recv().is_ok()) {
+                    ui.label("Received from backend");
+                }
+            });
+
+        ctx.request_repaint();
     }
 }
 
 fn main() {
-    let show_window = Arc::new(Mutex::new(true));
-    let show_window_condvar = Arc::new(std::sync::Condvar::new());
+    let (send_to_ui, recv_from_ui) = channel();
+    let (send_to_backend, recv_from_backend) = channel();
 
-    // Clone for the hook thread
-    let show_window_clone_for_thread = Arc::clone(&show_window);
-    let show_window_condvar_clone = Arc::clone(&show_window_condvar);
     let _ = thread::spawn(move || {
         unsafe {
             HOOK_HANDLE = Some(
@@ -74,57 +108,28 @@ fn main() {
                 UnhookWindowsHookEx(hook);
             }
         }
-
-        // Simulate triggering the UI thread to show the window
-        {
-            let mut show_window = show_window_clone_for_thread.lock().unwrap();
-            *show_window = true;
-            show_window_condvar_clone.notify_one();
-        }
     });
-
+    
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([300f32, 200f32]),
+        viewport: egui::ViewportBuilder::default()
+            // .with_decorations(false)
+            // .with_taskbar(false)
+            .with_maximized(true),
+            // .with_transparent(true),
+            // .with_always_on_top(),
         ..Default::default()
     };
-
-    // Main loop
-    let show_window_for_main = Arc::clone(&show_window);
-    loop {
-        // Wait until the window should be shown
-        let mut show_window = show_window_condvar
-            .wait_while(show_window_for_main.lock().unwrap(), |&mut show| !show)
-            .unwrap();
-
-        // If show_window is true, launch the GUI
-        let show_window_clone_for_app = Arc::clone(&show_window_for_main);
-        let result = eframe::run_native(
-            "Pathte",
-            options.clone(),
-            Box::new(move |_cc| {
-                Ok(Box::new(MyApp {
-                    show_window: show_window_clone_for_app,
-                }))
-            }),
-        );
-
-        if result.is_err() {
-            eprintln!("Error running eframe: {:?}", result);
-            break;
-        }
-
-        *show_window = false;
-
-        // Close the window using win32 DestroyWindow
-        unsafe {
-            let hwnd = GetConsoleWindow();
-            if !hwnd.is_null() {
-                ShowWindow(hwnd, winapi::um::winuser::SW_HIDE);
-                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
-            }
-        }
-        // There is a possible workaround described here: https://github.com/emilk/egui/pull/1889
-    }
+    let _ = eframe::run_native(
+        "Pathte",
+        options.clone(),
+        Box::new(move |_cc| {
+            Ok(Box::new(MyApp {
+                recv_from_backend: recv_from_ui,
+                send_to_backend: send_to_backend,
+                window_open: false,
+            }))
+        }),
+    );
 }
 
 unsafe extern "system" fn keyboard_hook_proc(
