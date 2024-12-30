@@ -1,17 +1,14 @@
 use clipboard_win::{formats, get_clipboard, is_format_avail, set_clipboard, SysResult};
 use eframe::egui::{self, Window};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use tray_icon::{
-    menu::{Menu, MenuItem},
-    TrayIconBuilder,
-};
 use lazy_static::lazy_static;
-use std::sync::mpsc::{Receiver, channel, Sender};
+use std::path::Path;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Mutex;
+use std::thread;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_SHIFT, VK_V,
+    keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
+    VK_SHIFT, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
@@ -23,7 +20,6 @@ static mut SELECTION_WINDOW_VISIBLE: bool = false;
 lazy_static! {
     static ref BACKEND_TO_UI_SENDER: Mutex<Option<Sender<BackendToUiSignal>>> = Mutex::new(None);
 }
-
 
 #[derive(Debug)]
 enum ClipboardError {
@@ -116,7 +112,6 @@ impl eframe::App for MyApp {
                 BackendToUiCommand::SelectPrevious => {
                     self.selected_path_type = self.selected_path_type.previous();
                 }
-                _ => {}
             }
         }
 
@@ -128,7 +123,11 @@ impl eframe::App for MyApp {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
-                    ui.selectable_value(&mut self.selected_path_type, PathType::Windows, "Windows path");
+                    ui.selectable_value(
+                        &mut self.selected_path_type,
+                        PathType::Windows,
+                        "Windows path",
+                    );
                     ui.selectable_value(&mut self.selected_path_type, PathType::Unix, "Unix path");
                     ui.selectable_value(&mut self.selected_path_type, PathType::WSL, "WSL path");
                 });
@@ -144,26 +143,22 @@ fn main() {
 
     *BACKEND_TO_UI_SENDER.lock().unwrap() = Some(send_to_ui);
 
-    println!("Starting tray icon");
+    let _ = thread::spawn(move || unsafe {
+        HOOK_HANDLE = Some(
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0)
+                .expect("Failed to set hook"),
+        );
 
-    let _ = thread::spawn(move || {
-        unsafe {
-            HOOK_HANDLE = Some(
-                SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0)
-                    .expect("Failed to set hook"),
-            );
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {
+            DispatchMessageW(&msg);
+        }
 
-            let mut msg = MSG::default();
-            while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {
-                DispatchMessageW(&msg);
-            }
-
-            if let Some(hook) = HOOK_HANDLE {
-                UnhookWindowsHookEx(hook);
-            }
+        if let Some(hook) = HOOK_HANDLE {
+            UnhookWindowsHookEx(hook);
         }
     });
-    
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_decorations(false)
@@ -203,25 +198,30 @@ unsafe extern "system" fn keyboard_hook_proc(
                     if SELECTION_WINDOW_VISIBLE {
                         if shift_pressed {
                             if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                                sender.send(BackendToUiSignal {
-                                    command: BackendToUiCommand::SelectPrevious,
-                                    payload: None,
-                                }).unwrap();
+                                sender
+                                    .send(BackendToUiSignal {
+                                        command: BackendToUiCommand::SelectPrevious,
+                                        payload: None,
+                                    })
+                                    .unwrap();
                             }
                         } else {
                             if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                                sender.send(BackendToUiSignal {
-                                    command: BackendToUiCommand::SelectNext,
-                                    payload: None,
-                                }).unwrap();
+                                sender
+                                    .send(BackendToUiSignal {
+                                        command: BackendToUiCommand::SelectNext,
+                                        payload: None,
+                                    })
+                                    .unwrap();
                             }
                         }
-                    }
-                    else if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                        sender.send(BackendToUiSignal {
-                            command: BackendToUiCommand::ShowWindow,
-                            payload: None,
-                        }).unwrap();
+                    } else if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                        sender
+                            .send(BackendToUiSignal {
+                                command: BackendToUiCommand::ShowWindow,
+                                payload: None,
+                            })
+                            .unwrap();
                         SELECTION_WINDOW_VISIBLE = true;
                     }
 
@@ -229,12 +229,17 @@ unsafe extern "system" fn keyboard_hook_proc(
                 }
             }
             WM_KEYUP => {
-                if (kb_struct.vkCode == VK_LCONTROL.0 as u32 || kb_struct.vkCode == VK_RCONTROL.0 as u32) && SELECTION_WINDOW_VISIBLE {
+                if (kb_struct.vkCode == VK_LCONTROL.0 as u32
+                    || kb_struct.vkCode == VK_RCONTROL.0 as u32)
+                    && SELECTION_WINDOW_VISIBLE
+                {
                     if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                        sender.send(BackendToUiSignal {
-                            command: BackendToUiCommand::HideWindow,
-                            payload: None,
-                        }).unwrap();
+                        sender
+                            .send(BackendToUiSignal {
+                                command: BackendToUiCommand::HideWindow,
+                                payload: None,
+                            })
+                            .unwrap();
                     }
 
                     if let Err(e) = handle_hotkey() {
