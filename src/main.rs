@@ -16,7 +16,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static mut HOOK_HANDLE: Option<HHOOK> = None;
-static mut SELECTION_WINDOW_VISIBLE: bool = false;
 lazy_static! {
     static ref BACKEND_TO_UI_SENDER: Mutex<Option<Sender<BackendToUiSignal>>> = Mutex::new(None);
 }
@@ -64,6 +63,7 @@ impl PathType {
 enum BackendToUiCommand {
     ShowWindow,
     HideWindow,
+    Select,
     SelectNext,
     SelectPrevious,
 }
@@ -111,6 +111,14 @@ impl eframe::App for MyApp {
                 }
                 BackendToUiCommand::SelectPrevious => {
                     self.selected_path_type = self.selected_path_type.previous();
+                }
+                BackendToUiCommand::Select => {
+                    self.selected_path_type = match signal.payload {
+                        Some(0) => PathType::Windows,
+                        Some(1) => PathType::Unix,
+                        Some(2) => PathType::WSL,
+                        _ => panic!("Invalid path type"),
+                    };
                 }
             }
         }
@@ -190,39 +198,46 @@ unsafe extern "system" fn keyboard_hook_proc(
     if code >= 0 {
         let kb_struct = *(l_param.0 as *const KBDLLHOOKSTRUCT);
         let ctrl_pressed = GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0;
-        let shift_pressed = GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0;
+        static mut SELECTION_WINDOW_VISIBLE: bool = false;
 
         match w_param.0 as u32 {
             WM_KEYDOWN => {
                 if kb_struct.vkCode == VK_V.0 as u32 && ctrl_pressed {
+                    let clipboard_text = get_clipboard_text();
+
                     if SELECTION_WINDOW_VISIBLE {
+                        let shift_pressed =
+                            GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0;
                         if shift_pressed {
                             if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                                sender
-                                    .send(BackendToUiSignal {
-                                        command: BackendToUiCommand::SelectPrevious,
-                                        payload: None,
-                                    })
-                                    .unwrap();
+                                let _ = sender.send(BackendToUiSignal {
+                                    command: BackendToUiCommand::SelectPrevious,
+                                    payload: None,
+                                });
                             }
                         } else {
                             if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                                sender
-                                    .send(BackendToUiSignal {
-                                        command: BackendToUiCommand::SelectNext,
-                                        payload: None,
-                                    })
-                                    .unwrap();
+                                let _ = sender.send(BackendToUiSignal {
+                                    command: BackendToUiCommand::SelectNext,
+                                    payload: None,
+                                });
                             }
                         }
-                    } else if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                        sender
-                            .send(BackendToUiSignal {
-                                command: BackendToUiCommand::ShowWindow,
-                                payload: None,
-                            })
-                            .unwrap();
-                        SELECTION_WINDOW_VISIBLE = true;
+                    } else if let Ok(text) = clipboard_text {
+                        let path_type = get_path_type(&text);
+                        if path_type.is_some() {
+                            if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                                let _ = sender.send(BackendToUiSignal {
+                                    command: BackendToUiCommand::Select,
+                                    payload: Some(path_type.unwrap() as i32),
+                                });
+                                let _ = sender.send(BackendToUiSignal {
+                                    command: BackendToUiCommand::ShowWindow,
+                                    payload: None,
+                                });
+                                SELECTION_WINDOW_VISIBLE = true;
+                            }
+                        }
                     }
 
                     return LRESULT(1); // Prevent the default Ctrl+V behavior
@@ -234,12 +249,10 @@ unsafe extern "system" fn keyboard_hook_proc(
                     && SELECTION_WINDOW_VISIBLE
                 {
                     if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                        sender
-                            .send(BackendToUiSignal {
-                                command: BackendToUiCommand::HideWindow,
-                                payload: None,
-                            })
-                            .unwrap();
+                        let _ = sender.send(BackendToUiSignal {
+                            command: BackendToUiCommand::HideWindow,
+                            payload: None,
+                        });
                     }
 
                     if let Err(e) = handle_hotkey() {
@@ -267,6 +280,18 @@ fn handle_hotkey() -> Result<(), ClipboardError> {
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+fn get_path_type(text: &str) -> Option<PathType> {
+    if text.contains('\\') {
+        Some(PathType::Windows)
+    } else if text.starts_with("/mnt/c/") {
+        Some(PathType::WSL)
+    } else if text.contains('/') {
+        Some(PathType::Unix)
+    } else {
+        None
     }
 }
 
@@ -310,3 +335,9 @@ fn simulate_paste() {
         );
     }
 }
+
+// windows:   C:\Users\user\Documents\file.txt
+// unix:      /home/user/Documents/file.txt
+// wsl:       /mnt/c/Users/user/Documents/file.txt
+//
+//
