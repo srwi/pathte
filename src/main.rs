@@ -7,10 +7,11 @@ use tray_icon::{
     menu::{Menu, MenuItem},
     TrayIconBuilder,
 };
+use lazy_static::lazy_static;
 use std::sync::mpsc::{Receiver, channel, Sender};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_V,
+    keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_SHIFT, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
@@ -18,7 +19,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static mut HOOK_HANDLE: Option<HHOOK> = None;
-static mut PREV_CTRL_STATE: bool = false;
+static mut SELECTION_WINDOW_VISIBLE: bool = false;
+lazy_static! {
+    static ref BACKEND_TO_UI_SENDER: Mutex<Option<Sender<BackendToUiSignal>>> = Mutex::new(None);
+}
+
 
 #[derive(Debug)]
 enum ClipboardError {
@@ -31,6 +36,31 @@ impl std::fmt::Display for ClipboardError {
         match self {
             ClipboardError::NoUnicodeText => write!(f, "Unicode text not available in clipboard"),
             ClipboardError::ClipboardError(e) => write!(f, "Clipboard error: {}", e),
+        }
+    }
+}
+
+#[derive(PartialEq)]
+enum PathType {
+    Windows,
+    Unix,
+    WSL,
+}
+
+impl PathType {
+    fn next(&self) -> PathType {
+        match self {
+            PathType::Windows => PathType::Unix,
+            PathType::Unix => PathType::WSL,
+            PathType::WSL => PathType::Windows,
+        }
+    }
+
+    fn previous(&self) -> PathType {
+        match self {
+            PathType::Windows => PathType::WSL,
+            PathType::Unix => PathType::Windows,
+            PathType::WSL => PathType::Unix,
         }
     }
 }
@@ -61,6 +91,7 @@ struct MyApp {
     recv_from_backend: Receiver<BackendToUiSignal>,
     send_to_backend: Sender<BackendToUiSignal>,
     window_open: bool,
+    selected_path_type: PathType,
 }
 
 impl eframe::App for MyApp {
@@ -69,19 +100,38 @@ impl eframe::App for MyApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
 
-        if self.recv_from_backend.try_recv().is_ok() {
-            self.window_open = true;
+        if let Ok(signal) = self.recv_from_backend.try_recv() {
+            match signal.command {
+                BackendToUiCommand::ShowWindow => {
+                    self.window_open = true;
+                }
+                BackendToUiCommand::HideWindow => {
+                    self.window_open = false;
+                }
+                BackendToUiCommand::SelectNext => {
+                    self.selected_path_type = self.selected_path_type.next();
+                }
+                BackendToUiCommand::SelectPrevious => {
+                    self.selected_path_type = self.selected_path_type.previous();
+                }
+                _ => {}
+            }
         }
 
         Window::new("Pathte")
             .open(&mut self.window_open)
             .fade_out(true)
+            .collapsible(false)
+            .title_bar(false)
+            .resizable(false)
             .show(ctx, |ui| {
-                if (self.recv_from_backend.try_recv().is_ok()) {
-                    ui.label("Received from backend");
-                }
+                ui.vertical(|ui| {
+                    ui.selectable_value(&mut self.selected_path_type, PathType::Windows, "Windows path");
+                    ui.selectable_value(&mut self.selected_path_type, PathType::Unix, "Unix path");
+                    ui.selectable_value(&mut self.selected_path_type, PathType::WSL, "WSL path");
+                });
             });
 
         ctx.request_repaint();
@@ -91,6 +141,10 @@ impl eframe::App for MyApp {
 fn main() {
     let (send_to_ui, recv_from_ui) = channel();
     let (send_to_backend, recv_from_backend) = channel();
+
+    *BACKEND_TO_UI_SENDER.lock().unwrap() = Some(send_to_ui);
+
+    println!("Starting tray icon");
 
     let _ = thread::spawn(move || {
         unsafe {
@@ -112,11 +166,11 @@ fn main() {
     
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            // .with_decorations(false)
-            // .with_taskbar(false)
-            .with_maximized(true),
-            // .with_transparent(true),
-            // .with_always_on_top(),
+            .with_decorations(false)
+            .with_taskbar(false)
+            .with_maximized(true)
+            .with_transparent(true)
+            .with_always_on_top(),
         ..Default::default()
     };
     let _ = eframe::run_native(
@@ -127,6 +181,7 @@ fn main() {
                 recv_from_backend: recv_from_ui,
                 send_to_backend: send_to_backend,
                 window_open: false,
+                selected_path_type: PathType::Unix,
             }))
         }),
     );
@@ -140,20 +195,53 @@ unsafe extern "system" fn keyboard_hook_proc(
     if code >= 0 {
         let kb_struct = *(l_param.0 as *const KBDLLHOOKSTRUCT);
         let ctrl_pressed = GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0;
+        let shift_pressed = GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0;
 
         match w_param.0 as u32 {
             WM_KEYDOWN => {
-                if kb_struct.vkCode == VK_V.0 as u32 && ctrl_pressed && !PREV_CTRL_STATE {
-                    PREV_CTRL_STATE = true;
-                    if let Err(e) = handle_hotkey() {
-                        eprintln!("Error: {}", e);
+                if kb_struct.vkCode == VK_V.0 as u32 && ctrl_pressed {
+                    if SELECTION_WINDOW_VISIBLE {
+                        if shift_pressed {
+                            if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                                sender.send(BackendToUiSignal {
+                                    command: BackendToUiCommand::SelectPrevious,
+                                    payload: None,
+                                }).unwrap();
+                            }
+                        } else {
+                            if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                                sender.send(BackendToUiSignal {
+                                    command: BackendToUiCommand::SelectNext,
+                                    payload: None,
+                                }).unwrap();
+                            }
+                        }
                     }
+                    else if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                        sender.send(BackendToUiSignal {
+                            command: BackendToUiCommand::ShowWindow,
+                            payload: None,
+                        }).unwrap();
+                        SELECTION_WINDOW_VISIBLE = true;
+                    }
+
                     return LRESULT(1); // Prevent the default Ctrl+V behavior
                 }
             }
             WM_KEYUP => {
-                if kb_struct.vkCode == VK_CONTROL.0 as u32 {
-                    PREV_CTRL_STATE = false;
+                if (kb_struct.vkCode == VK_LCONTROL.0 as u32 || kb_struct.vkCode == VK_RCONTROL.0 as u32) && SELECTION_WINDOW_VISIBLE {
+                    if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                        sender.send(BackendToUiSignal {
+                            command: BackendToUiCommand::HideWindow,
+                            payload: None,
+                        }).unwrap();
+                    }
+
+                    if let Err(e) = handle_hotkey() {
+                        eprintln!("Error: {}", e);
+                    }
+
+                    SELECTION_WINDOW_VISIBLE = false;
                 }
             }
             _ => {}

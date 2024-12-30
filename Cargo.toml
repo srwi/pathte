@@ -10,3 +10,4 @@ tray-icon = "0.19.2"
 global-hotkey = "0.3"
 clipboard-win = "4.5"
 windows = { version = "0.48", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+lazy_static = "1.5.0"
