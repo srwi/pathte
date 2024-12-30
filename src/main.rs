@@ -35,7 +35,7 @@ impl std::fmt::Display for ClipboardError {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Debug)]
 enum PathType {
     Windows,
     Unix,
@@ -70,7 +70,7 @@ enum BackendToUiCommand {
 
 struct BackendToUiSignal {
     command: BackendToUiCommand,
-    payload: Option<i32>,
+    payload: Option<PathType>,
 }
 
 enum UiToBackendSignal {
@@ -113,12 +113,7 @@ impl eframe::App for MyApp {
                     self.selected_path_type = self.selected_path_type.previous();
                 }
                 BackendToUiCommand::Select => {
-                    self.selected_path_type = match signal.payload {
-                        Some(0) => PathType::Windows,
-                        Some(1) => PathType::Unix,
-                        Some(2) => PathType::WSL,
-                        _ => panic!("Invalid path type"),
-                    };
+                    self.selected_path_type = signal.payload.unwrap();
                 }
             }
         }
@@ -199,6 +194,7 @@ unsafe extern "system" fn keyboard_hook_proc(
         let kb_struct = *(l_param.0 as *const KBDLLHOOKSTRUCT);
         let ctrl_pressed = GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0;
         static mut SELECTION_WINDOW_VISIBLE: bool = false;
+        static mut SELECTED_PATH_TYPE: PathType = PathType::Unix;
 
         match w_param.0 as u32 {
             WM_KEYDOWN => {
@@ -210,6 +206,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                             GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0;
                         if shift_pressed {
                             if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                                SELECTED_PATH_TYPE = SELECTED_PATH_TYPE.previous();
                                 let _ = sender.send(BackendToUiSignal {
                                     command: BackendToUiCommand::SelectPrevious,
                                     payload: None,
@@ -217,30 +214,36 @@ unsafe extern "system" fn keyboard_hook_proc(
                             }
                         } else {
                             if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                                SELECTED_PATH_TYPE = SELECTED_PATH_TYPE.next();
                                 let _ = sender.send(BackendToUiSignal {
                                     command: BackendToUiCommand::SelectNext,
                                     payload: None,
                                 });
                             }
                         }
+
+                        return LRESULT(1); // Prevent the default Ctrl+V behavior
                     } else if let Ok(text) = clipboard_text {
                         let path_type = get_path_type(&text);
+                        println!("{:?}", path_type.clone());
                         if path_type.is_some() {
                             if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                                SELECTED_PATH_TYPE = path_type.clone().unwrap();
                                 let _ = sender.send(BackendToUiSignal {
                                     command: BackendToUiCommand::Select,
-                                    payload: Some(path_type.unwrap() as i32),
+                                    payload: Some(path_type.unwrap()),
                                 });
+
+                                SELECTION_WINDOW_VISIBLE = true;
                                 let _ = sender.send(BackendToUiSignal {
                                     command: BackendToUiCommand::ShowWindow,
                                     payload: None,
                                 });
-                                SELECTION_WINDOW_VISIBLE = true;
+
+                                return LRESULT(1); // Prevent the default Ctrl+V behavior
                             }
                         }
                     }
-
-                    return LRESULT(1); // Prevent the default Ctrl+V behavior
                 }
             }
             WM_KEYUP => {
@@ -264,26 +267,30 @@ unsafe extern "system" fn keyboard_hook_proc(
             }
             _ => {}
         }
+
+        return CallNextHookEx(HOOK_HANDLE.unwrap_or(HHOOK(0)), code, w_param, l_param);
     }
 
     CallNextHookEx(HOOK_HANDLE.unwrap_or(HHOOK(0)), code, w_param, l_param)
 }
 
 fn handle_hotkey() -> Result<(), ClipboardError> {
-    match get_clipboard_text() {
-        Ok(text) => {
-            if let Some(converted) = convert_if_valid_path(&text) {
-                set_clipboard_text(&converted)
-                    .map_err(|e| ClipboardError::ClipboardError(e.to_string()))?;
-                simulate_paste();
-            }
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
+    // match get_clipboard_text() {
+    //     Ok(text) => {
+    //         if let Some(converted) = convert_if_valid_path(&text) {
+    //             set_clipboard_text(&converted)
+    //                 .map_err(|e| ClipboardError::ClipboardError(e.to_string()))?;
+    //             simulate_paste();
+    //         }
+    //         Ok(())
+    //     }
+    //     Err(e) => Err(e),
+    // }
+    Ok(())
 }
 
 fn get_path_type(text: &str) -> Option<PathType> {
+    println!("{}", text);
     if text.contains('\\') {
         Some(PathType::Windows)
     } else if text.starts_with("/mnt/c/") {
