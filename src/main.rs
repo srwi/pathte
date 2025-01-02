@@ -1,19 +1,33 @@
+mod path;
+
+use std::{
+    path::Path,
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Mutex,
+    },
+    thread,
+};
+
 use clipboard_win::{formats, get_clipboard, is_format_avail, set_clipboard, SysResult};
 use eframe::egui::{self, Window};
 use lazy_static::lazy_static;
-use std::path::Path;
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Mutex;
-use std::thread;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
-    VK_SHIFT, VK_V,
+
+use windows::Win32::{
+    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    UI::{
+        Input::KeyboardAndMouse::{
+            keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
+            VK_SHIFT, VK_V,
+        },
+        WindowsAndMessaging::{
+            CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
+            HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+        },
+    },
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
-    KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-};
+
+use crate::path::{ConvertablePath, PathFactory, PathType};
 
 static mut HOOK_HANDLE: Option<HHOOK> = None;
 lazy_static! {
@@ -35,37 +49,10 @@ impl std::fmt::Display for ClipboardError {
     }
 }
 
-#[derive(PartialEq, Clone, Debug)]
-enum PathType {
-    Windows,
-    Unix,
-    WSL,
-}
-
-impl PathType {
-    fn next(&self) -> PathType {
-        match self {
-            PathType::Windows => PathType::Unix,
-            PathType::Unix => PathType::WSL,
-            PathType::WSL => PathType::Windows,
-        }
-    }
-
-    fn previous(&self) -> PathType {
-        match self {
-            PathType::Windows => PathType::WSL,
-            PathType::Unix => PathType::Windows,
-            PathType::WSL => PathType::Unix,
-        }
-    }
-}
-
 enum BackendToUiCommand {
     ShowWindow,
     HideWindow,
     Select,
-    SelectNext,
-    SelectPrevious,
 }
 
 struct BackendToUiSignal {
@@ -106,12 +93,6 @@ impl eframe::App for MyApp {
                 BackendToUiCommand::HideWindow => {
                     self.window_open = false;
                 }
-                BackendToUiCommand::SelectNext => {
-                    self.selected_path_type = self.selected_path_type.next();
-                }
-                BackendToUiCommand::SelectPrevious => {
-                    self.selected_path_type = self.selected_path_type.previous();
-                }
                 BackendToUiCommand::Select => {
                     self.selected_path_type = signal.payload.unwrap();
                 }
@@ -135,8 +116,6 @@ impl eframe::App for MyApp {
                     ui.selectable_value(&mut self.selected_path_type, PathType::WSL, "WSL path");
                 });
             });
-
-        ctx.request_repaint();
     }
 }
 
@@ -194,7 +173,7 @@ unsafe extern "system" fn keyboard_hook_proc(
         let kb_struct = *(l_param.0 as *const KBDLLHOOKSTRUCT);
         let ctrl_pressed = GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0;
         static mut SELECTION_WINDOW_VISIBLE: bool = false;
-        static mut SELECTED_PATH_TYPE: PathType = PathType::Unix;
+        static mut SELECTED_PATH: Option<ConvertablePath> = None;
 
         match w_param.0 as u32 {
             WM_KEYDOWN => {
@@ -202,36 +181,31 @@ unsafe extern "system" fn keyboard_hook_proc(
                     let clipboard_text = get_clipboard_text();
 
                     if SELECTION_WINDOW_VISIBLE {
-                        let shift_pressed =
-                            GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0;
-                        if shift_pressed {
-                            if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                                SELECTED_PATH_TYPE = SELECTED_PATH_TYPE.previous();
-                                let _ = sender.send(BackendToUiSignal {
-                                    command: BackendToUiCommand::SelectPrevious,
-                                    payload: None,
-                                });
-                            }
-                        } else {
-                            if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                                SELECTED_PATH_TYPE = SELECTED_PATH_TYPE.next();
-                                let _ = sender.send(BackendToUiSignal {
-                                    command: BackendToUiCommand::SelectNext,
-                                    payload: None,
-                                });
-                            }
+                        if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                            let shift_pressed =
+                                GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0;
+
+                            SELECTED_PATH = if shift_pressed {
+                                SELECTED_PATH.clone().map(|p| p.previous())
+                            } else {
+                                SELECTED_PATH.clone().map(|p| p.next())
+                            };
+
+                            let _ = sender.send(BackendToUiSignal {
+                                command: BackendToUiCommand::Select,
+                                payload: SELECTED_PATH.clone().map(|p| p.path_type()),
+                            });
                         }
 
                         return LRESULT(1); // Prevent the default Ctrl+V behavior
                     } else if let Ok(text) = clipboard_text {
-                        let path_type = get_path_type(&text);
-                        println!("{:?}", path_type.clone());
-                        if path_type.is_some() {
+                        SELECTED_PATH = PathFactory::create(&text);
+
+                        if SELECTED_PATH.is_some() {
                             if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                                SELECTED_PATH_TYPE = path_type.clone().unwrap();
                                 let _ = sender.send(BackendToUiSignal {
                                     command: BackendToUiCommand::Select,
-                                    payload: Some(path_type.unwrap()),
+                                    payload: SELECTED_PATH.clone().map(|p| p.path_type()),
                                 });
 
                                 SELECTION_WINDOW_VISIBLE = true;
@@ -290,8 +264,9 @@ fn handle_hotkey() -> Result<(), ClipboardError> {
 }
 
 fn get_path_type(text: &str) -> Option<PathType> {
-    println!("{}", text);
-    if text.contains('\\') {
+    if text.contains("\n") {
+        None
+    } else if text.contains('\\') {
         Some(PathType::Windows)
     } else if text.starts_with("/mnt/c/") {
         Some(PathType::WSL)
