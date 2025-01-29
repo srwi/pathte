@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Debug, PartialEq)]
 pub enum PathType {
     Windows,
@@ -30,11 +28,23 @@ pub struct WslPath {
 }
 
 impl ConvertablePath {
-    pub fn raw_path(&self) -> &str {
+    pub fn from_path(path: String) -> Result<Self, String> {
+        if path.starts_with("/mnt/") {
+            Ok(ConvertablePath::WSL(WslPath::new(path)))
+        } else if path.contains('\\') || path.contains("C:") || path.contains("c:") {
+            Ok(ConvertablePath::Windows(WindowsPath::new(path)))
+        } else if path.starts_with('/') {
+            Ok(ConvertablePath::Unix(UnixPath::new(path)))
+        } else {
+            Err("Invalid path format".to_string())
+        }
+    }
+
+    pub fn to_string(&self) -> String {
         match self {
-            ConvertablePath::Windows(p) => &p.path,
-            ConvertablePath::Unix(p) => &p.path,
-            ConvertablePath::WSL(p) => &p.path,
+            ConvertablePath::Windows(p) => p.path.clone(),
+            ConvertablePath::Unix(p) => p.path.clone(),
+            ConvertablePath::WSL(p) => p.path.clone(),
         }
     }
 
@@ -67,6 +77,30 @@ impl WindowsPath {
     pub fn new(path: String) -> Self {
         WindowsPath { path }
     }
+}
+
+impl UnixPath {
+    pub fn new(path: String) -> Self {
+        UnixPath { path }
+    }
+}
+
+impl WslPath {
+    pub fn new(path: String) -> Self {
+        WslPath { path }
+    }
+}
+
+pub trait PathConverter {
+    fn to_windows(&self) -> WindowsPath;
+    fn to_unix(&self) -> UnixPath;
+    fn to_wsl(&self) -> WslPath;
+}
+
+impl PathConverter for WindowsPath {
+    fn to_windows(&self) -> WindowsPath {
+        self.clone()
+    }
 
     fn to_unix(&self) -> UnixPath {
         let unix_path = self.path.replace('\\', "/");
@@ -85,14 +119,14 @@ impl WindowsPath {
     }
 }
 
-impl UnixPath {
-    pub fn new(path: String) -> Self {
-        UnixPath { path }
-    }
-
+impl PathConverter for UnixPath {
     fn to_windows(&self) -> WindowsPath {
         let windows_path = self.path.replace('/', "\\");
         WindowsPath::new(windows_path)
+    }
+
+    fn to_unix(&self) -> UnixPath {
+        self.clone()
     }
 
     fn to_wsl(&self) -> WslPath {
@@ -101,11 +135,7 @@ impl UnixPath {
     }
 }
 
-impl WslPath {
-    pub fn new(path: String) -> Self {
-        WslPath { path }
-    }
-
+impl PathConverter for WslPath {
     fn to_windows(&self) -> WindowsPath {
         let windows_path = self.path.trim_start_matches("/mnt/c/").replace('/', "\\");
         WindowsPath::new(format!("C:\\{}", windows_path))
@@ -115,31 +145,9 @@ impl WslPath {
         let unix_path = self.path.trim_start_matches("/mnt/c");
         UnixPath::new(unix_path.to_string())
     }
-}
 
-pub struct PathFactory;
-
-impl PathFactory {
-    pub fn create(path: &str) -> Option<ConvertablePath> {
-        if path.contains('\\') {
-            Some(ConvertablePath::Windows(WindowsPath::new(path.to_string())))
-        } else if path.starts_with("/mnt/c/") {
-            Some(ConvertablePath::WSL(WslPath::new(path.to_string())))
-        } else if path.contains('/') {
-            Some(ConvertablePath::Unix(UnixPath::new(path.to_string())))
-        } else {
-            None
-        }
-    }
-}
-
-impl fmt::Display for ConvertablePath {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            ConvertablePath::Windows(p) => write!(f, "WindowsPath({})", p.path),
-            ConvertablePath::Unix(p) => write!(f, "UnixPath({})", p.path),
-            ConvertablePath::WSL(p) => write!(f, "WslPath({})", p.path),
-        }
+    fn to_wsl(&self) -> WslPath {
+        self.clone()
     }
 }
 
@@ -149,9 +157,11 @@ mod tests {
 
     #[test]
     fn test_path_creation() {
-        let windows_path = PathFactory::create(r"C:\Users\test\file.txt").unwrap();
-        let unix_path = PathFactory::create("/home/user/file.txt").unwrap();
-        let wsl_path = PathFactory::create("/mnt/c/Users/test/file.txt").unwrap();
+        let windows_path =
+            ConvertablePath::from_path(r"C:\Users\test\file.txt".to_string()).unwrap();
+        let unix_path = ConvertablePath::from_path("/home/user/file.txt".to_string()).unwrap();
+        let wsl_path =
+            ConvertablePath::from_path("/mnt/c/Users/test/file.txt".to_string()).unwrap();
 
         assert_eq!(windows_path.path_type(), PathType::Windows);
         assert_eq!(unix_path.path_type(), PathType::Unix);

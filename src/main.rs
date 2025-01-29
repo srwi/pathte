@@ -27,7 +27,7 @@ use windows::Win32::{
     },
 };
 
-use crate::path::{ConvertablePath, PathFactory, PathType};
+use crate::path::{ConvertablePath, PathType};
 
 static mut HOOK_HANDLE: Option<HHOOK> = None;
 lazy_static! {
@@ -172,15 +172,12 @@ unsafe extern "system" fn keyboard_hook_proc(
     if code >= 0 {
         let kb_struct = *(l_param.0 as *const KBDLLHOOKSTRUCT);
         let ctrl_pressed = GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0;
-        static mut SELECTION_WINDOW_VISIBLE: bool = false;
         static mut SELECTED_PATH: Option<ConvertablePath> = None;
 
         match w_param.0 as u32 {
             WM_KEYDOWN => {
                 if kb_struct.vkCode == VK_V.0 as u32 && ctrl_pressed {
-                    let clipboard_text = get_clipboard_text();
-
-                    if SELECTION_WINDOW_VISIBLE {
+                    if SELECTED_PATH.is_some() {
                         if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
                             let shift_pressed =
                                 GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0;
@@ -198,8 +195,11 @@ unsafe extern "system" fn keyboard_hook_proc(
                         }
 
                         return LRESULT(1); // Prevent the default Ctrl+V behavior
-                    } else if let Ok(text) = clipboard_text {
-                        SELECTED_PATH = PathFactory::create(&text);
+                    } else if let Ok(text) = get_clipboard_text() {
+                        SELECTED_PATH = match ConvertablePath::from_path(text.clone()) {
+                            Ok(path) => Some(path),
+                            Err(_) => None,
+                        };
 
                         if SELECTED_PATH.is_some() {
                             if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
@@ -208,7 +208,6 @@ unsafe extern "system" fn keyboard_hook_proc(
                                     payload: SELECTED_PATH.clone().map(|p| p.path_type()),
                                 });
 
-                                SELECTION_WINDOW_VISIBLE = true;
                                 let _ = sender.send(BackendToUiSignal {
                                     command: BackendToUiCommand::ShowWindow,
                                     payload: None,
@@ -223,7 +222,7 @@ unsafe extern "system" fn keyboard_hook_proc(
             WM_KEYUP => {
                 if (kb_struct.vkCode == VK_LCONTROL.0 as u32
                     || kb_struct.vkCode == VK_RCONTROL.0 as u32)
-                    && SELECTION_WINDOW_VISIBLE
+                    && SELECTED_PATH.is_some()
                 {
                     if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
                         let _ = sender.send(BackendToUiSignal {
@@ -232,11 +231,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                         });
                     }
 
-                    if let Err(e) = handle_hotkey() {
-                        eprintln!("Error: {}", e);
-                    }
-
-                    SELECTION_WINDOW_VISIBLE = false;
+                    let _ = paste_path(SELECTED_PATH.take().unwrap()); // TODO: Display errors
                 }
             }
             _ => {}
@@ -248,44 +243,14 @@ unsafe extern "system" fn keyboard_hook_proc(
     CallNextHookEx(HOOK_HANDLE.unwrap_or(HHOOK(0)), code, w_param, l_param)
 }
 
-fn handle_hotkey() -> Result<(), ClipboardError> {
-    // match get_clipboard_text() {
-    //     Ok(text) => {
-    //         if let Some(converted) = convert_if_valid_path(&text) {
-    //             set_clipboard_text(&converted)
-    //                 .map_err(|e| ClipboardError::ClipboardError(e.to_string()))?;
-    //             simulate_paste();
-    //         }
-    //         Ok(())
-    //     }
-    //     Err(e) => Err(e),
-    // }
-    Ok(())
-}
-
-fn get_path_type(text: &str) -> Option<PathType> {
-    if text.contains("\n") {
-        None
-    } else if text.contains('\\') {
-        Some(PathType::Windows)
-    } else if text.starts_with("/mnt/c/") {
-        Some(PathType::WSL)
-    } else if text.contains('/') {
-        Some(PathType::Unix)
-    } else {
-        None
+fn paste_path(path: ConvertablePath) -> Result<(), ClipboardError> {
+    match set_clipboard_text(&path.to_string()) {
+        Ok(_) => {
+            simulate_paste();
+            Ok(())
+        }
+        Err(e) => Err(ClipboardError::ClipboardError(e.to_string())),
     }
-}
-
-fn convert_if_valid_path(text: &str) -> Option<String> {
-    if !text.contains('\\') {
-        return None;
-    }
-    let path = Path::new(text);
-    if path.components().count() <= 1 {
-        return None;
-    }
-    Some(text.replace('\\', "/"))
 }
 
 fn get_clipboard_text() -> Result<String, ClipboardError> {
