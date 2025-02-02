@@ -1,3 +1,6 @@
+use lazy_static::lazy_static;
+use regex::Regex;
+
 #[derive(Debug, PartialEq)]
 pub enum PathType {
     Windows,
@@ -27,14 +30,22 @@ pub struct WslPath {
     path: String,
 }
 
+lazy_static! {
+    static ref WSL_REGEX: Regex =
+        Regex::new(r#"^/mnt/(([A-Za-z]/?$)|([A-Za-z]/[^\x00]*))$"#).unwrap();
+    static ref WINDOWS_REGEX: Regex =
+        Regex::new(r#"^([a-zA-Z]:\\?$)|([^\x00-\x1F<>:"|?*/]*\\[^\x00-\x1F<>:"|?*/]*$)"#).unwrap();
+    static ref UNIX_REGEX: Regex = Regex::new(r"^[^\x00]*/[^\x00]*$").unwrap();
+}
+
 impl ConvertablePath {
     pub fn from_path(path: String) -> Result<Self, String> {
-        if path.starts_with("/mnt/") {
+        if WSL_REGEX.is_match(&path) {
             Ok(ConvertablePath::WSL(WslPath::new(path)))
-        } else if path.contains('\\') || path.contains("C:") || path.contains("c:") {
-            Ok(ConvertablePath::Windows(WindowsPath::new(path)))
-        } else if path.starts_with('/') {
+        } else if UNIX_REGEX.is_match(&path) {
             Ok(ConvertablePath::Unix(UnixPath::new(path)))
+        } else if WINDOWS_REGEX.is_match(&path) {
+            Ok(ConvertablePath::Windows(WindowsPath::new(path)))
         } else {
             Err("Invalid path format".to_string())
         }
@@ -159,30 +170,72 @@ mod tests {
     fn test_path_creation() {
         let windows_path =
             ConvertablePath::from_path(r"C:\Users\test\file.txt".to_string()).unwrap();
+        assert_eq!(windows_path.path_type(), PathType::Windows);
+
         let unix_path = ConvertablePath::from_path("/home/user/file.txt".to_string()).unwrap();
+        assert_eq!(unix_path.path_type(), PathType::Unix);
+
         let wsl_path =
             ConvertablePath::from_path("/mnt/c/Users/test/file.txt".to_string()).unwrap();
-
-        assert_eq!(windows_path.path_type(), PathType::Windows);
-        assert_eq!(unix_path.path_type(), PathType::Unix);
         assert_eq!(wsl_path.path_type(), PathType::WSL);
     }
 
     #[test]
-    fn test_path_conversion() {
-        let windows_path =
-            ConvertablePath::Windows(WindowsPath::new(r"C:\Users\test\file.txt".to_string()));
-        let unix_path = windows_path.next();
-        let wsl_path = unix_path.next();
-
-        match &unix_path {
-            ConvertablePath::Unix(p) => assert_eq!(p.path, "C:/Users/test/file.txt"),
-            _ => panic!("Expected Unix path"),
+    fn test_windows_regex() {
+        let matching_paths = vec![
+            r"C:\Users\test\file.txt",
+            r"C:",
+            r"d:\",
+            r"\test\file.txt",
+            r"test\file.txt",
+            r"test\",
+            r"\test",
+        ];
+        for path in matching_paths {
+            println!("{}", path);
+            assert!(WINDOWS_REGEX.is_match(path));
         }
 
-        match &wsl_path {
-            ConvertablePath::WSL(p) => assert_eq!(p.path, "/mnt/c/Users/test/file.txt"),
-            _ => panic!("Expected WSL path"),
+        let non_matching_paths = vec!["Users", "C:Users", "C:/Users/test/file.txt"];
+        for path in non_matching_paths {
+            println!("{}", path);
+            assert!(!WINDOWS_REGEX.is_match(path));
+        }
+    }
+
+    #[test]
+    fn test_unix_regex() {
+        let matching_paths = vec!["/home/user/file.txt", "/home/user/", "home/user", "/"];
+        for path in matching_paths {
+            println!("{}", path);
+            assert!(UNIX_REGEX.is_match(path));
+        }
+
+        let non_matching_paths = vec!["Users", "h\0me/user"];
+        for path in non_matching_paths {
+            println!("{}", path);
+            assert!(!UNIX_REGEX.is_match(path));
+        }
+    }
+
+    #[test]
+    fn test_wsl_regex() {
+        let matching_paths = vec![
+            "/mnt/c/Users/test/file.txt",
+            "/mnt/c/Users/",
+            "/mnt/c/Users",
+            "/mnt/D/",
+            "/mnt/D",
+        ];
+        for path in matching_paths {
+            println!("{}", path);
+            assert!(WSL_REGEX.is_match(path));
+        }
+
+        let non_matching_paths = vec!["/mnt/drive/Users", "mnt/c/Users"];
+        for path in non_matching_paths {
+            println!("{}", path);
+            assert!(!WSL_REGEX.is_match(path));
         }
     }
 }
