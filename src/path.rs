@@ -119,20 +119,19 @@ impl PathConverter for WindowsPath {
     }
 
     fn to_wsl(&self) -> WslPath {
-        let wsl_path = format!(
-            "/mnt/c/{}",
-            self.path
-                .replace('\\', "/")
-                .trim_start_matches("C:")
-                .trim_start_matches("c:")
-        );
+        let drive_regex = Regex::new(r"^([A-Za-z]):").unwrap();
+        let wsl_path = drive_regex
+            .replace(&self.path, |captures: &regex::Captures| {
+                format!("/mnt/{}", &captures[1].to_lowercase())
+            })
+            .replace("\\", "/");
         WslPath::new(wsl_path)
     }
 }
 
 impl PathConverter for UnixPath {
     fn to_windows(&self) -> WindowsPath {
-        let windows_path = self.path.replace('/', "\\");
+        let windows_path = self.path.replace("/", "\\");
         WindowsPath::new(windows_path)
     }
 
@@ -141,20 +140,23 @@ impl PathConverter for UnixPath {
     }
 
     fn to_wsl(&self) -> WslPath {
-        let wsl_path = format!("/mnt/c/{}", self.path.trim_start_matches('/'));
-        WslPath::new(wsl_path)
+        WslPath::new(self.path.clone())
     }
 }
 
 impl PathConverter for WslPath {
     fn to_windows(&self) -> WindowsPath {
-        let windows_path = self.path.trim_start_matches("/mnt/c/").replace('/', "\\");
-        WindowsPath::new(format!("C:\\{}", windows_path))
+        let drive_regex = Regex::new(r"^/mnt/([A-Za-z])").unwrap();
+        let windows_path = drive_regex
+            .replace(&self.path, |captures: &regex::Captures| {
+                format!("{}:", &captures[1].to_uppercase())
+            })
+            .replace('/', "\\");
+        WindowsPath::new(windows_path)
     }
 
     fn to_unix(&self) -> UnixPath {
-        let unix_path = self.path.trim_start_matches("/mnt/c");
-        UnixPath::new(unix_path.to_string())
+        UnixPath::new(self.path.clone())
     }
 
     fn to_wsl(&self) -> WslPath {
@@ -236,6 +238,71 @@ mod tests {
         for path in non_matching_paths {
             println!("{}", path);
             assert!(!WSL_REGEX.is_match(path));
+        }
+    }
+
+    #[test]
+    fn test_windows_to_unix_conversion() {
+        let pairs = vec![
+            (r"C:\Users\test\file.txt", "C:/Users/test/file.txt"),
+            (r"c:\", "c:/"),
+            (r"d:", "d:"),
+            (r"\Users\test\", "/Users/test/"),
+        ];
+
+        for (input, expected) in pairs {
+            let windows_path = WindowsPath::new(input.to_string());
+            let unix_path = windows_path.to_unix();
+            assert_eq!(unix_path.path, expected);
+        }
+    }
+
+    #[test]
+    fn test_unix_to_windows_conversion() {
+        let pairs = vec![
+            ("/home/user/file.txt", r"\home\user\file.txt"),
+            ("home/user/", r"home\user\"),
+            ("/", r"\"),
+            ("C:/", r"C:\"),
+            ("d:/", r"d:\"),
+        ];
+
+        for (input, expected) in pairs {
+            let unix_path = UnixPath::new(input.to_string());
+            let windows_path = unix_path.to_windows();
+            assert_eq!(windows_path.path, expected);
+        }
+    }
+
+    #[test]
+    fn test_wsl_to_windows_conversion() {
+        let pairs = vec![
+            ("/mnt/c/Users/test/file.txt", r"C:\Users\test\file.txt"),
+            ("/mnt/c/Users/", r"C:\Users\"),
+            ("/mnt/D/", r"D:\"),
+            ("/mnt/D", r"D:"),
+        ];
+
+        for (input, expected) in pairs {
+            let wsl_path = WslPath::new(input.to_string());
+            let windows_path = wsl_path.to_windows();
+            assert_eq!(windows_path.path, expected);
+        }
+    }
+
+    #[test]
+    fn test_windows_to_wsl_conversion() {
+        let pairs = vec![
+            (r"c:\Users\test\file.txt", "/mnt/c/Users/test/file.txt"),
+            (r"C:\", "/mnt/c/"),
+            (r"D:", "/mnt/d"),
+            (r"\Users\test\", "/Users/test/"),
+        ];
+
+        for (input, expected) in pairs {
+            let windows_path = WindowsPath::new(input.to_string());
+            let wsl_path = windows_path.to_wsl();
+            assert_eq!(wsl_path.path, expected);
         }
     }
 }
