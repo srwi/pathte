@@ -1,7 +1,6 @@
 mod path;
 
 use std::{
-    path::Path,
     sync::{
         mpsc::{channel, Receiver, Sender},
         Mutex,
@@ -32,21 +31,6 @@ use crate::path::{ConvertablePath, PathType};
 static mut HOOK_HANDLE: Option<HHOOK> = None;
 lazy_static! {
     static ref BACKEND_TO_UI_SENDER: Mutex<Option<Sender<BackendToUiSignal>>> = Mutex::new(None);
-}
-
-#[derive(Debug)]
-enum ClipboardError {
-    NoUnicodeText,
-    ClipboardError(String),
-}
-
-impl std::fmt::Display for ClipboardError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            ClipboardError::NoUnicodeText => write!(f, "Unicode text not available in clipboard"),
-            ClipboardError::ClipboardError(e) => write!(f, "Clipboard error: {}", e),
-        }
-    }
 }
 
 enum BackendToUiCommand {
@@ -243,21 +227,23 @@ unsafe extern "system" fn keyboard_hook_proc(
     CallNextHookEx(HOOK_HANDLE.unwrap_or(HHOOK(0)), code, w_param, l_param)
 }
 
-fn paste_path(path: ConvertablePath) -> Result<(), ClipboardError> {
-    match set_clipboard_text(&path.to_string()) {
-        Ok(_) => {
+fn paste_path(path: ConvertablePath) -> Result<(), String> {
+    match get_clipboard_text() {
+        Ok(original_path) => {
+            set_clipboard_text(&path.to_string()).map_err(|e| e.to_string())?;
             simulate_paste();
-            Ok(())
+            set_clipboard_text(&original_path).map_err(|e| e.to_string())?;
         }
-        Err(e) => Err(ClipboardError::ClipboardError(e.to_string())),
+        Err(e) => return Err(e),
     }
+    Ok(())
 }
 
-fn get_clipboard_text() -> Result<String, ClipboardError> {
+fn get_clipboard_text() -> Result<String, String> {
     if !is_format_avail(formats::CF_UNICODETEXT) {
-        return Err(ClipboardError::NoUnicodeText);
+        return Err("Clipboard does not support unicode text.".to_string());
     }
-    get_clipboard(formats::Unicode).map_err(|e| ClipboardError::ClipboardError(e.to_string()))
+    get_clipboard(formats::Unicode).map_err(|e| e.to_string())
 }
 
 fn set_clipboard_text(text: &str) -> SysResult<()> {
