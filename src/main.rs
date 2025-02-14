@@ -11,7 +11,6 @@ use std::{
 use clipboard_win::{formats, get_clipboard, is_format_avail, set_clipboard, SysResult};
 use eframe::egui::{self, Window};
 use lazy_static::lazy_static;
-
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     UI::{
@@ -42,16 +41,6 @@ enum BackendToUiCommand {
 struct BackendToUiSignal {
     command: BackendToUiCommand,
     payload: Option<PathType>,
-}
-
-enum UiToBackendSignal {
-    Select,
-    Cancel,
-}
-
-struct UiToBackendCommand {
-    command: BackendToUiCommand,
-    payload: Option<i32>,
 }
 
 struct MyApp {
@@ -103,27 +92,39 @@ impl eframe::App for MyApp {
     }
 }
 
-fn main() {
-    let (send_to_ui, recv_from_ui) = channel();
-    let (send_to_backend, recv_from_backend) = channel();
+unsafe fn set_hook() {
+    HOOK_HANDLE = Some(
+        SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0)
+            .expect("Failed to set hook"),
+    );
+}
 
-    *BACKEND_TO_UI_SENDER.lock().unwrap() = Some(send_to_ui);
+unsafe fn unhook() {
+    if let Some(hook) = HOOK_HANDLE {
+        UnhookWindowsHookEx(hook);
+    }
+}
 
+fn start_keyboard_hook_thread() {
     let _ = thread::spawn(move || unsafe {
-        HOOK_HANDLE = Some(
-            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0)
-                .expect("Failed to set hook"),
-        );
+        set_hook();
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {
             DispatchMessageW(&msg);
         }
 
-        if let Some(hook) = HOOK_HANDLE {
-            UnhookWindowsHookEx(hook);
-        }
+        unhook();
     });
+}
+
+fn main() {
+    let (send_to_ui, recv_from_ui) = channel();
+    let (send_to_backend, recv_from_backend) = channel();
+
+    *BACKEND_TO_UI_SENDER.lock().unwrap() = Some(send_to_ui);
+
+    start_keyboard_hook_thread();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -216,6 +217,8 @@ unsafe extern "system" fn keyboard_hook_proc(
                     }
 
                     let _ = paste_path(SELECTED_PATH.take().unwrap()); // TODO: Display errors
+
+                    return LRESULT(1); // Prevent the default Ctrl+V behavior
                 }
             }
             _ => {}
@@ -231,8 +234,14 @@ fn paste_path(path: ConvertablePath) -> Result<(), String> {
     match get_clipboard_text() {
         Ok(original_path) => {
             set_clipboard_text(&path.to_string()).map_err(|e| e.to_string())?;
-            simulate_paste();
-            set_clipboard_text(&original_path).map_err(|e| e.to_string())?;
+            unsafe {
+                simulate_paste();
+            }
+            thread::spawn(move || {
+                // The simulated keypresses take some time to register, so we wait a bit before restoring the clipboard
+                thread::sleep(std::time::Duration::from_millis(100));
+                let _ = set_clipboard_text(&original_path);
+            });
         }
         Err(e) => return Err(e),
     }
@@ -250,23 +259,13 @@ fn set_clipboard_text(text: &str) -> SysResult<()> {
     set_clipboard(formats::Unicode, text)
 }
 
-fn simulate_paste() {
-    unsafe {
-        keybd_event(VK_CONTROL.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-        keybd_event(VK_V.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-        keybd_event(
-            VK_V.0 as u8,
-            0,
-            KEYBD_EVENT_FLAGS(2), // KEYEVENTF_KEYUP
-            0,
-        );
-        keybd_event(
-            VK_CONTROL.0 as u8,
-            0,
-            KEYBD_EVENT_FLAGS(2), // KEYEVENTF_KEYUP
-            0,
-        );
-    }
+unsafe fn simulate_paste() {
+    unhook();
+    keybd_event(VK_CONTROL.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+    keybd_event(VK_V.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+    keybd_event(VK_V.0 as u8, 0, KEYBD_EVENT_FLAGS(2), 0);
+    keybd_event(VK_CONTROL.0 as u8, 0, KEYBD_EVENT_FLAGS(2), 0);
+    set_hook();
 }
 
 // windows:   C:\Users\user\Documents\file.txt
