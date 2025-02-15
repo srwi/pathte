@@ -1,5 +1,8 @@
 mod path;
 
+use clipboard_win::{formats, get_clipboard, is_format_avail, set_clipboard, SysResult};
+use eframe::egui::{self, Window};
+use lazy_static::lazy_static;
 use std::{
     sync::{
         mpsc::{channel, Receiver, Sender},
@@ -7,20 +10,18 @@ use std::{
     },
     thread,
 };
-
-use clipboard_win::{formats, get_clipboard, is_format_avail, set_clipboard, SysResult};
-use eframe::egui::{self, Window};
-use lazy_static::lazy_static;
+use windows::core::PCWSTR;
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
     UI::{
         Input::KeyboardAndMouse::{
             keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
             VK_SHIFT, VK_V,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
-            HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+            CallNextHookEx, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, SetWindowPos,
+            SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, MSG,
+            SWP_NOSIZE, SWP_NOZORDER, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
         },
     },
 };
@@ -43,14 +44,14 @@ struct BackendToUiSignal {
     payload: Option<PathType>,
 }
 
-struct MyApp {
+struct Pathte {
     recv_from_backend: Receiver<BackendToUiSignal>,
     send_to_backend: Sender<BackendToUiSignal>,
     window_open: bool,
     selected_path_type: PathType,
 }
 
-impl eframe::App for MyApp {
+impl eframe::App for Pathte {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         egui::Rgba::TRANSPARENT.to_array()
     }
@@ -77,6 +78,7 @@ impl eframe::App for MyApp {
             .fade_out(true)
             .collapsible(false)
             .title_bar(false)
+            .fixed_pos((10.0, 10.0))
             .resizable(false)
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
@@ -130,7 +132,8 @@ fn main() {
         viewport: egui::ViewportBuilder::default()
             .with_decorations(false)
             .with_taskbar(false)
-            .with_maximized(true)
+            .with_inner_size((300.0, 300.0))
+            .with_position((100000.0, 100000.0))
             .with_transparent(true)
             .with_always_on_top(),
         ..Default::default()
@@ -139,7 +142,7 @@ fn main() {
         "Pathte",
         options.clone(),
         Box::new(move |_cc| {
-            Ok(Box::new(MyApp {
+            Ok(Box::new(Pathte {
                 recv_from_backend: recv_from_ui,
                 send_to_backend: send_to_backend,
                 window_open: false,
@@ -197,6 +200,25 @@ unsafe extern "system" fn keyboard_hook_proc(
                                     command: BackendToUiCommand::ShowWindow,
                                     payload: None,
                                 });
+
+                                // Set window position to cursor position
+                                let hwnd = FindWindowW(
+                                    None,
+                                    PCWSTR::from_raw(
+                                        "Pathte\0".encode_utf16().collect::<Vec<u16>>().as_ptr(),
+                                    ),
+                                );
+                                let mut cursor_pos = POINT::default();
+                                GetCursorPos(&mut cursor_pos);
+                                SetWindowPos(
+                                    hwnd,
+                                    HWND_TOPMOST,
+                                    cursor_pos.x,
+                                    cursor_pos.y,
+                                    0,
+                                    0,
+                                    SWP_NOSIZE | SWP_NOZORDER,
+                                );
 
                                 return LRESULT(1); // Prevent the default Ctrl+V behavior
                             }
