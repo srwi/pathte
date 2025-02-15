@@ -82,13 +82,9 @@ impl eframe::App for Pathte {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
-                    ui.selectable_value(
-                        &mut self.selected_path_type,
-                        PathType::Windows,
-                        "Windows path",
-                    );
-                    ui.selectable_value(&mut self.selected_path_type, PathType::Unix, "Unix path");
-                    ui.selectable_value(&mut self.selected_path_type, PathType::WSL, "WSL path");
+                    ui.selectable_value(&mut self.selected_path_type, PathType::Windows, "Windows");
+                    ui.selectable_value(&mut self.selected_path_type, PathType::Unix, "Unix");
+                    ui.selectable_value(&mut self.selected_path_type, PathType::WSL, "WSL");
                 });
             });
     }

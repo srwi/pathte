@@ -36,10 +36,15 @@ lazy_static! {
     static ref WINDOWS_REGEX: Regex =
         Regex::new(r#"^([a-zA-Z]:\\?$)|([^\x00-\x1F<>:"|?*/]*\\[^\x00-\x1F<>:"|?*/]*$)"#).unwrap();
     static ref UNIX_REGEX: Regex = Regex::new(r"^[^\x00]*/[^\x00]*$").unwrap();
+    static ref PROTOCOL_REGEX: Regex = Regex::new(r"(http|https|ftp|sftp|file):$").unwrap();
 }
 
 impl ConvertablePath {
     pub fn from_path(path: String) -> Result<Self, String> {
+        if path.contains('\n') || PROTOCOL_REGEX.is_match(&path) {
+            return Err("Invalid path format".to_string());
+        }
+
         if WSL_REGEX.is_match(&path) {
             Ok(ConvertablePath::WSL(WslPath::new(path)))
         } else if UNIX_REGEX.is_match(&path) {
@@ -140,7 +145,13 @@ impl PathConverter for UnixPath {
     }
 
     fn to_wsl(&self) -> WslPath {
-        WslPath::new(self.path.clone())
+        let drive_regex = Regex::new(r"^([A-Za-z]):").unwrap();
+        if drive_regex.is_match(&self.path) {
+            let windows_path = self.to_windows();
+            windows_path.to_wsl()
+        } else {
+            WslPath::new(self.path.clone())
+        }
     }
 }
 
