@@ -5,32 +5,27 @@ use clipboard_win::{formats, get_clipboard, is_format_avail, set_clipboard, SysR
 use eframe::egui::{self, Window};
 use lazy_static::lazy_static;
 use path_selection::{PathSelection, PathSelectionInfo};
-use std::{
-    sync::{
-        mpsc::{channel, Receiver, Sender},
-        Mutex,
-    },
-    thread,
+use std::sync::{
+    mpsc::{channel, Receiver, Sender},
+    Mutex,
 };
+use std::thread;
 use windows::core::PCWSTR;
-use windows::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
-    UI::{
-        Input::KeyboardAndMouse::{
-            keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
-            VK_SHIFT, VK_V,
-        },
-        WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, SetWindowPos,
-            SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, MSG,
-            SWP_NOSIZE, SWP_NOZORDER, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-        },
-    },
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
+    VK_SHIFT, VK_V,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, SetWindowPos,
+    SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, MSG, SWP_NOSIZE,
+    SWP_NOZORDER, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
 };
 
-static mut HOOK_HANDLE: Option<HHOOK> = None;
-lazy_static! {  // TODO: move to thread instead?
+lazy_static! {
+    static ref HOOK_HANDLE: Mutex<Option<HHOOK>> = Mutex::new(None);
     static ref GUI_SENDER: Mutex<Option<Sender<Option<PathSelectionInfo>>>> = Mutex::new(None);
+    static ref PATH_SELECTION: Mutex<Option<PathSelection>> = Mutex::new(None);
 }
 
 struct Pathte {
@@ -73,26 +68,32 @@ impl eframe::App for Pathte {
     }
 }
 
-unsafe fn set_hook() {
-    HOOK_HANDLE = Some(
+fn set_hook() {
+    let handle = unsafe {
         SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0)
-            .expect("Failed to set hook"),
-    );
+            .expect("Failed to set keyboard hook.")
+    };
+
+    *HOOK_HANDLE.lock().unwrap() = Some(handle);
 }
 
-unsafe fn unhook() {
-    if let Some(hook) = HOOK_HANDLE {
-        UnhookWindowsHookEx(hook);
+fn unhook() {
+    if let Some(hook) = *HOOK_HANDLE.lock().unwrap() {
+        unsafe {
+            UnhookWindowsHookEx(hook);
+        }
     }
 }
 
 fn start_keyboard_hook_thread() {
-    let _ = thread::spawn(move || unsafe {
+    let _ = thread::spawn(move || {
         set_hook();
 
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {
-            DispatchMessageW(&msg);
+        unsafe {
+            while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {
+                DispatchMessageW(&msg);
+            }
         }
 
         unhook();
@@ -135,33 +136,33 @@ unsafe extern "system" fn keyboard_hook_proc(
     if code >= 0 {
         let kb_struct = *(l_param.0 as *const KBDLLHOOKSTRUCT);
         let ctrl_pressed = GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0;
-        static mut PATH_SELECTION: Option<PathSelection> = None;
+        let mut path_selection = PATH_SELECTION.lock().unwrap();
 
         match w_param.0 as u32 {
             WM_KEYDOWN => {
                 if kb_struct.vkCode == VK_V.0 as u32 && ctrl_pressed {
-                    if PATH_SELECTION.is_some() {
+                    if path_selection.is_some() {
                         if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
                             let shift_pressed =
                                 GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0;
 
                             if shift_pressed {
-                                PATH_SELECTION.as_mut().unwrap().previous();
+                                path_selection.as_mut().unwrap().previous();
                             } else {
-                                PATH_SELECTION.as_mut().unwrap().next();
+                                path_selection.as_mut().unwrap().next();
                             };
 
-                            let _ = sender.send(PATH_SELECTION.as_ref().map(|ps| ps.get_info()));
+                            let _ = sender.send(path_selection.as_ref().map(|ps| ps.get_info()));
                         }
 
                         return LRESULT(1); // Prevent the default Ctrl+V behavior
                     } else if let Ok(text) = get_clipboard_text() {
-                        PATH_SELECTION = PathSelection::new(text);
+                        *path_selection = PathSelection::new(text);
 
-                        if PATH_SELECTION.is_some() {
+                        if path_selection.is_some() {
                             if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
                                 let _ =
-                                    sender.send(PATH_SELECTION.as_ref().map(|ps| ps.get_info()));
+                                    sender.send(path_selection.as_ref().map(|ps| ps.get_info()));
 
                                 // Set window position to cursor position
                                 let hwnd = FindWindowW(
@@ -191,13 +192,13 @@ unsafe extern "system" fn keyboard_hook_proc(
             WM_KEYUP => {
                 if (kb_struct.vkCode == VK_LCONTROL.0 as u32
                     || kb_struct.vkCode == VK_RCONTROL.0 as u32)
-                    && PATH_SELECTION.is_some()
+                    && path_selection.is_some()
                 {
                     if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
                         let _ = sender.send(None);
                     }
 
-                    let path = PATH_SELECTION.take().unwrap().get_selected_path_string();
+                    let path = path_selection.take().unwrap().get_selected_path_string();
                     let _ = paste_path(path); // TODO: Display errors
 
                     return LRESULT(1); // Prevent the default Ctrl+V behavior
@@ -206,19 +207,27 @@ unsafe extern "system" fn keyboard_hook_proc(
             _ => {}
         }
 
-        return CallNextHookEx(HOOK_HANDLE.unwrap_or(HHOOK(0)), code, w_param, l_param);
+        return CallNextHookEx(
+            HOOK_HANDLE.lock().unwrap().unwrap_or(HHOOK(0)),
+            code,
+            w_param,
+            l_param,
+        );
     }
 
-    CallNextHookEx(HOOK_HANDLE.unwrap_or(HHOOK(0)), code, w_param, l_param)
+    CallNextHookEx(
+        HOOK_HANDLE.lock().unwrap().unwrap_or(HHOOK(0)),
+        code,
+        w_param,
+        l_param,
+    )
 }
 
 fn paste_path(path: String) -> Result<(), String> {
     match get_clipboard_text() {
         Ok(original_path) => {
             set_clipboard_text(&path).map_err(|e| e.to_string())?;
-            unsafe {
-                simulate_paste();
-            }
+            simulate_paste();
             thread::spawn(move || {
                 // The simulated keypresses take some time to register, so we wait a bit before restoring the clipboard
                 thread::sleep(std::time::Duration::from_millis(100));
@@ -241,12 +250,14 @@ fn set_clipboard_text(text: &str) -> SysResult<()> {
     set_clipboard(formats::Unicode, text)
 }
 
-unsafe fn simulate_paste() {
+fn simulate_paste() {
     unhook();
-    keybd_event(VK_CONTROL.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-    keybd_event(VK_V.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-    keybd_event(VK_V.0 as u8, 0, KEYBD_EVENT_FLAGS(2), 0);
-    keybd_event(VK_CONTROL.0 as u8, 0, KEYBD_EVENT_FLAGS(2), 0);
+    unsafe {
+        keybd_event(VK_CONTROL.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(VK_V.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(VK_V.0 as u8, 0, KEYBD_EVENT_FLAGS(2), 0);
+        keybd_event(VK_CONTROL.0 as u8, 0, KEYBD_EVENT_FLAGS(2), 0);
+    }
     set_hook();
 }
 
