@@ -3,13 +3,16 @@ mod path_selection;
 
 use clipboard_win::{formats, get_clipboard, is_format_avail, set_clipboard, SysResult};
 use eframe::egui::{self, Window};
+use image::load_from_memory;
 use lazy_static::lazy_static;
 use path_selection::{PathSelection, PathSelectionInfo};
+use std::process;
 use std::sync::{
     mpsc::{channel, Receiver, Sender},
     Mutex,
 };
 use std::thread;
+use tray_icon::{menu::Menu, menu::MenuEvent, menu::MenuItem, Icon, TrayIcon, TrayIconBuilder};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -100,10 +103,47 @@ fn start_keyboard_hook_thread() {
     });
 }
 
+fn create_icon() -> Icon {
+    const ICON_BYTES: &[u8] = include_bytes!("..\\resources\\icon.ico");
+
+    let icon = load_from_memory(ICON_BYTES)
+        .expect("Failed to load icon.")
+        .into_rgba8();
+
+    let (width, height) = icon.dimensions();
+    let icon = Icon::from_rgba(icon.into_raw(), width, height).expect("Failed to create icon.");
+
+    icon
+}
+
+fn create_tray_icon() -> TrayIcon {
+    let quit = MenuItem::new("Quit", true, None);
+    let menu = Menu::new();
+    menu.append(&quit).expect("Failed to append menu item.");
+
+    let icon = create_icon();
+
+    let tray_icon = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_icon(icon)
+        .with_tooltip("Pathte - Path selector")
+        .build()
+        .unwrap();
+
+    thread::spawn(move || {
+        while let Ok(_) = MenuEvent::receiver().recv() {
+            process::exit(0);
+        }
+    });
+
+    tray_icon
+}
+
 fn main() {
     let (gui_sender, gui_receiver) = channel();
     *GUI_SENDER.lock().unwrap() = Some(gui_sender);
 
+    let tray_icon = create_tray_icon();
     start_keyboard_hook_thread();
 
     let options = eframe::NativeOptions {
@@ -265,4 +305,4 @@ fn simulate_paste() {
 // unix:      /home/user/Documents/file.txt
 // wsl:       /mnt/c/Users/user/Documents/file.txt
 //
-//
+//C:/Users/user/Documents/file.txt
