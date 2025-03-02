@@ -1,8 +1,10 @@
 mod path;
+mod path_selection;
 
 use clipboard_win::{formats, get_clipboard, is_format_avail, set_clipboard, SysResult};
 use eframe::egui::{self, Window};
 use lazy_static::lazy_static;
+use path_selection::{PathSelection, PathSelectionInfo};
 use std::{
     sync::{
         mpsc::{channel, Receiver, Sender},
@@ -26,29 +28,14 @@ use windows::Win32::{
     },
 };
 
-use crate::path::{ConvertablePath, PathType};
-
 static mut HOOK_HANDLE: Option<HHOOK> = None;
-lazy_static! {
-    static ref BACKEND_TO_UI_SENDER: Mutex<Option<Sender<BackendToUiSignal>>> = Mutex::new(None);
-}
-
-enum BackendToUiCommand {
-    ShowWindow,
-    HideWindow,
-    Select,
-}
-
-struct BackendToUiSignal {
-    command: BackendToUiCommand,
-    payload: Option<PathType>,
+lazy_static! {  // TODO: move to thread instead?
+    static ref GUI_SENDER: Mutex<Option<Sender<Option<PathSelectionInfo>>>> = Mutex::new(None);
 }
 
 struct Pathte {
-    recv_from_backend: Receiver<BackendToUiSignal>,
-    send_to_backend: Sender<BackendToUiSignal>,
-    window_open: bool,
-    selected_path_type: PathType,
+    signal_receiver: Receiver<Option<PathSelectionInfo>>,
+    current_path_selection_info: Option<PathSelectionInfo>,
 }
 
 impl eframe::App for Pathte {
@@ -59,33 +46,29 @@ impl eframe::App for Pathte {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
 
-        if let Ok(signal) = self.recv_from_backend.try_recv() {
-            match signal.command {
-                BackendToUiCommand::ShowWindow => {
-                    self.window_open = true;
-                }
-                BackendToUiCommand::HideWindow => {
-                    self.window_open = false;
-                }
-                BackendToUiCommand::Select => {
-                    self.selected_path_type = signal.payload.unwrap();
-                }
-            }
+        if let Ok(path_selection_info) = self.signal_receiver.try_recv() {
+            self.current_path_selection_info = path_selection_info;
         }
 
         Window::new("Pathte")
-            .open(&mut self.window_open)
+            .open(&mut self.current_path_selection_info.is_some())
             .fade_out(true)
             .collapsible(false)
             .title_bar(false)
             .fixed_pos((10.0, 10.0))
             .resizable(false)
             .show(ctx, |ui| {
-                ui.vertical(|ui| {
-                    ui.selectable_value(&mut self.selected_path_type, PathType::Windows, "Windows");
-                    ui.selectable_value(&mut self.selected_path_type, PathType::Unix, "Unix");
-                    ui.selectable_value(&mut self.selected_path_type, PathType::WSL, "WSL");
-                });
+                egui::Grid::new("path_grid")
+                    .spacing([-5.0, 0.0]) // Adjust the spacing between columns
+                    .show(ui, |ui| {
+                        if let Some(info) = &mut self.current_path_selection_info {
+                            for (index, option) in info.options.iter().enumerate() {
+                                ui.label(&option.label);
+                                ui.selectable_value(&mut info.selected, index, &option.path);
+                                ui.end_row();
+                            }
+                        }
+                    });
             });
     }
 }
@@ -117,10 +100,8 @@ fn start_keyboard_hook_thread() {
 }
 
 fn main() {
-    let (send_to_ui, recv_from_ui) = channel();
-    let (send_to_backend, recv_from_backend) = channel();
-
-    *BACKEND_TO_UI_SENDER.lock().unwrap() = Some(send_to_ui);
+    let (gui_sender, gui_receiver) = channel();
+    *GUI_SENDER.lock().unwrap() = Some(gui_sender);
 
     start_keyboard_hook_thread();
 
@@ -139,10 +120,8 @@ fn main() {
         options.clone(),
         Box::new(move |_cc| {
             Ok(Box::new(Pathte {
-                recv_from_backend: recv_from_ui,
-                send_to_backend: send_to_backend,
-                window_open: false,
-                selected_path_type: PathType::Unix,
+                signal_receiver: gui_receiver,
+                current_path_selection_info: None,
             }))
         }),
     );
@@ -156,46 +135,33 @@ unsafe extern "system" fn keyboard_hook_proc(
     if code >= 0 {
         let kb_struct = *(l_param.0 as *const KBDLLHOOKSTRUCT);
         let ctrl_pressed = GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0;
-        static mut SELECTED_PATH: Option<ConvertablePath> = None;
+        static mut PATH_SELECTION: Option<PathSelection> = None;
 
         match w_param.0 as u32 {
             WM_KEYDOWN => {
                 if kb_struct.vkCode == VK_V.0 as u32 && ctrl_pressed {
-                    if SELECTED_PATH.is_some() {
-                        if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
+                    if PATH_SELECTION.is_some() {
+                        if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
                             let shift_pressed =
                                 GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0;
 
-                            SELECTED_PATH = if shift_pressed {
-                                SELECTED_PATH.clone().map(|p| p.previous())
+                            if shift_pressed {
+                                PATH_SELECTION.as_mut().unwrap().previous();
                             } else {
-                                SELECTED_PATH.clone().map(|p| p.next())
+                                PATH_SELECTION.as_mut().unwrap().next();
                             };
 
-                            let _ = sender.send(BackendToUiSignal {
-                                command: BackendToUiCommand::Select,
-                                payload: SELECTED_PATH.clone().map(|p| p.path_type()),
-                            });
+                            let _ = sender.send(PATH_SELECTION.as_ref().map(|ps| ps.get_info()));
                         }
 
                         return LRESULT(1); // Prevent the default Ctrl+V behavior
                     } else if let Ok(text) = get_clipboard_text() {
-                        SELECTED_PATH = match ConvertablePath::from_path(text.clone()) {
-                            Ok(path) => Some(path),
-                            Err(_) => None,
-                        };
+                        PATH_SELECTION = PathSelection::new(text);
 
-                        if SELECTED_PATH.is_some() {
-                            if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                                let _ = sender.send(BackendToUiSignal {
-                                    command: BackendToUiCommand::Select,
-                                    payload: SELECTED_PATH.clone().map(|p| p.path_type()),
-                                });
-
-                                let _ = sender.send(BackendToUiSignal {
-                                    command: BackendToUiCommand::ShowWindow,
-                                    payload: None,
-                                });
+                        if PATH_SELECTION.is_some() {
+                            if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
+                                let _ =
+                                    sender.send(PATH_SELECTION.as_ref().map(|ps| ps.get_info()));
 
                                 // Set window position to cursor position
                                 let hwnd = FindWindowW(
@@ -225,16 +191,14 @@ unsafe extern "system" fn keyboard_hook_proc(
             WM_KEYUP => {
                 if (kb_struct.vkCode == VK_LCONTROL.0 as u32
                     || kb_struct.vkCode == VK_RCONTROL.0 as u32)
-                    && SELECTED_PATH.is_some()
+                    && PATH_SELECTION.is_some()
                 {
-                    if let Some(sender) = BACKEND_TO_UI_SENDER.lock().unwrap().as_ref() {
-                        let _ = sender.send(BackendToUiSignal {
-                            command: BackendToUiCommand::HideWindow,
-                            payload: None,
-                        });
+                    if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
+                        let _ = sender.send(None);
                     }
 
-                    let _ = paste_path(SELECTED_PATH.take().unwrap()); // TODO: Display errors
+                    let path = PATH_SELECTION.take().unwrap().get_selected_path_string();
+                    let _ = paste_path(path); // TODO: Display errors
 
                     return LRESULT(1); // Prevent the default Ctrl+V behavior
                 }
@@ -248,10 +212,10 @@ unsafe extern "system" fn keyboard_hook_proc(
     CallNextHookEx(HOOK_HANDLE.unwrap_or(HHOOK(0)), code, w_param, l_param)
 }
 
-fn paste_path(path: ConvertablePath) -> Result<(), String> {
+fn paste_path(path: String) -> Result<(), String> {
     match get_clipboard_text() {
         Ok(original_path) => {
-            set_clipboard_text(&path.to_string()).map_err(|e| e.to_string())?;
+            set_clipboard_text(&path).map_err(|e| e.to_string())?;
             unsafe {
                 simulate_paste();
             }
