@@ -55,7 +55,7 @@ impl eframe::App for Pathte {
             .resizable(false)
             .show(ctx, |ui| {
                 egui::Grid::new("path_grid")
-                    .spacing([-5.0, 0.0]) // Adjust the spacing between columns
+                    .spacing([-5.0, 0.0])
                     .show(ui, |ui| {
                         if let Some(info) = &mut self.current_path_selection_info {
                             for (index, option) in info.options.iter().enumerate() {
@@ -263,9 +263,3 @@ fn simulate_paste() {
     }
     set_hook();
 }
-
-// windows:   C:\Users\user\Documents\file.txt
-// unix:      /home/user/Documents/file.txt
-// wsl:       /mnt/c/Users/user/Documents/file.txt
-//
-//C:/Users/user/Documents/file.txt
