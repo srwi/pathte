@@ -5,6 +5,10 @@ Have you ever pasted a file path into a terminal, only to find it's in the wrong
 
 Pathte is a handy Windows utility that effortlessly converts file paths between Windows, Unix, and WSL formats as you paste. Enhance your workflow with Pathte by detecting file paths in your clipboard and instantly converting them to the desired format, making your pasting experience smoother and more efficient.
 
+<p align="center">
+    <img src="resources/demo.gif" alt="Pathte Demo" width="60%"/>
+</p>
+
 ## How It Works
 
 When you press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste, Pathte checks if your clipboard contains a valid file path. If so, a popup menu appears with the available format options. You can then press <kbd>V</kbd> to cycle through the formats, and release <kbd>Ctrl</kbd> to paste the path in your selected format:
