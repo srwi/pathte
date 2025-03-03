@@ -82,7 +82,7 @@ impl PathSelection {
         } else if let Ok(wsl_path) = WslPath::new(path) {
             Some(Box::new(wsl_path))
         } else {
-            panic!("Invalid path format");
+            None
         }
     }
 }
