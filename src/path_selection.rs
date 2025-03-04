@@ -28,7 +28,7 @@ impl PathSelection {
         let ok_options: Vec<Box<dyn Path>> = options
             .into_iter()
             .filter(|x| x.is_ok())
-            .map(|x| x.unwrap())
+            .flatten()
             .collect();
 
         let initial_selection = ok_options

@@ -11,9 +11,7 @@ fn create_icon() -> Icon {
         .into_rgba8();
 
     let (width, height) = icon.dimensions();
-    let icon = Icon::from_rgba(icon.into_raw(), width, height).expect("Failed to create icon.");
-
-    icon
+    Icon::from_rgba(icon.into_raw(), width, height).expect("Failed to create icon.")
 }
 
 pub fn create_tray_icon() -> TrayIcon {
@@ -31,7 +29,7 @@ pub fn create_tray_icon() -> TrayIcon {
         .unwrap();
 
     thread::spawn(move || {
-        while let Ok(_) = MenuEvent::receiver().recv() {
+        if MenuEvent::receiver().recv().is_ok() {
             process::exit(0);
         }
     });
