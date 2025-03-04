@@ -24,6 +24,8 @@ lazy_static! {
     static ref PATH_SELECTION: Mutex<Option<PathSelection>> = Mutex::new(None);
 }
 
+static APP_NAME: &str = "Pathte";
+
 struct Pathte {
     signal_receiver: Receiver<Option<PathSelectionInfo>>,
     current_path_selection_info: Option<PathSelectionInfo>,
@@ -41,7 +43,7 @@ impl eframe::App for Pathte {
             self.current_path_selection_info = path_selection_info;
         }
 
-        Window::new("Pathte")
+        Window::new(APP_NAME)
             .open(&mut self.current_path_selection_info.is_some())
             .fade_out(true)
             .collapsible(false)
@@ -84,7 +86,7 @@ fn main() {
         ..Default::default()
     };
     let _ = eframe::run_native(
-        "Pathte",
+        APP_NAME,
         options.clone(),
         Box::new(move |_cc| {
             Ok(Box::new(Pathte {
@@ -102,34 +104,34 @@ fn handle_keyboard_event(event_type: u32, kb_struct: &KBDLLHOOKSTRUCT) -> bool {
     match event_type {
         WM_KEYDOWN => {
             if kb_struct.vkCode == VK_V.0 as u32 && ctrl_pressed {
-                if path_selection.is_some() {
+                if let Some(ref mut selection) = *path_selection {
                     // Handle Ctrl + V when a path is already selected
                     if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
                         let shift_pressed =
                             unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0 };
 
                         if shift_pressed {
-                            path_selection.as_mut().unwrap().previous();
+                            selection.previous();
                         } else {
-                            path_selection.as_mut().unwrap().next();
-                        };
+                            selection.next();
+                        }
 
-                        let _ = sender.send(path_selection.as_ref().map(|ps| ps.get_info()));
+                        let _ = sender.send(Some(selection.get_info()));
                     }
-                    return Some(true); // Intercept keypress
+                    return true;
                 } else if let Ok(text) = clipboard::get_clipboard_text() {
                     // Handle Ctrl + V when no path is selected
                     *path_selection = PathSelection::new(text);
 
-                    if path_selection.is_some() {
+                    if let Some(ref selection) = *path_selection {
                         if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
-                            let _ = sender.send(path_selection.as_ref().map(|ps| ps.get_info()));
+                            let _ = sender.send(Some(selection.get_info()));
 
                             if let Ok(hwnd) = win_api::find_app_window() {
                                 let _ = win_api::move_window_to_cursor(hwnd);
                             }
 
-                            return true; // Intercept keypress
+                            return true;
                         }
                     }
                 }
@@ -148,7 +150,7 @@ fn handle_keyboard_event(event_type: u32, kb_struct: &KBDLLHOOKSTRUCT) -> bool {
                 let path = path_selection.take().unwrap().get_selected_path_string();
                 let _ = clipboard::paste_path(path);
 
-                return true; // Intercept keypress
+                return true;
             }
         }
         _ => {}
