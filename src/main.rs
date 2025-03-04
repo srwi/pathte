@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod path;
 mod path_selection;
 mod tray;
