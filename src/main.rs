@@ -79,7 +79,7 @@ fn main() {
         viewport: egui::ViewportBuilder::default()
             .with_decorations(false)
             .with_taskbar(false)
-            .with_inner_size((300.0, 300.0))
+            .with_inner_size((1000.0, 300.0))
             .with_position((100000.0, 100000.0))
             .with_transparent(true)
             .with_always_on_top(),
