@@ -14,6 +14,10 @@ use std::sync::{
     mpsc::{channel, Receiver, Sender},
     Mutex,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_SHIFT, VK_V,
+};
+use windows::Win32::UI::WindowsAndMessaging::{KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP};
 
 lazy_static! {
     static ref GUI_SENDER: Mutex<Option<Sender<Option<PathSelectionInfo>>>> = Mutex::new(None);
@@ -66,6 +70,7 @@ fn main() {
 
     let _tray_icon = tray::create_tray_icon();
 
+    keyboard_hook::set_keyboard_handler(handle_keyboard_event);
     keyboard_hook::start_keyboard_hook_thread();
 
     let options = eframe::NativeOptions {
@@ -88,4 +93,66 @@ fn main() {
             }))
         }),
     );
+}
+
+fn handle_keyboard_event(event_type: u32, kb_struct: &KBDLLHOOKSTRUCT) -> bool {
+    let ctrl_pressed = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0 };
+    let mut path_selection = PATH_SELECTION.lock().unwrap();
+
+    match event_type {
+        WM_KEYDOWN => {
+            if kb_struct.vkCode == VK_V.0 as u32 && ctrl_pressed {
+                if path_selection.is_some() {
+                    // Handle Ctrl + V when a path is already selected
+                    if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
+                        let shift_pressed =
+                            unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0 };
+
+                        if shift_pressed {
+                            path_selection.as_mut().unwrap().previous();
+                        } else {
+                            path_selection.as_mut().unwrap().next();
+                        };
+
+                        let _ = sender.send(path_selection.as_ref().map(|ps| ps.get_info()));
+                    }
+                    return Some(true); // Intercept keypress
+                } else if let Ok(text) = clipboard::get_clipboard_text() {
+                    // Handle Ctrl + V when no path is selected
+                    *path_selection = PathSelection::new(text);
+
+                    if path_selection.is_some() {
+                        if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
+                            let _ = sender.send(path_selection.as_ref().map(|ps| ps.get_info()));
+
+                            if let Ok(hwnd) = win_api::find_app_window() {
+                                let _ = win_api::move_window_to_cursor(hwnd);
+                            }
+
+                            return true; // Intercept keypress
+                        }
+                    }
+                }
+            }
+        }
+        WM_KEYUP => {
+            if (kb_struct.vkCode == VK_LCONTROL.0 as u32
+                || kb_struct.vkCode == VK_RCONTROL.0 as u32)
+                && path_selection.is_some()
+            {
+                // Handle Ctrl release (paste the selected path)
+                if let Some(sender) = GUI_SENDER.lock().unwrap().as_ref() {
+                    let _ = sender.send(None);
+                }
+
+                let path = path_selection.take().unwrap().get_selected_path_string();
+                let _ = clipboard::paste_path(path);
+
+                return true; // Intercept keypress
+            }
+        }
+        _ => {}
+    }
+
+    false // Don't intercept by default
 }
