@@ -3,6 +3,7 @@
 mod path;
 mod path_selection;
 mod tray;
+mod win_api;
 
 use clipboard_win::{formats, get_clipboard, is_format_avail, set_clipboard, SysResult};
 use eframe::egui::{self, Window};
@@ -13,16 +14,14 @@ use std::sync::{
     Mutex,
 };
 use std::thread;
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
     VK_SHIFT, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, SetWindowPos,
-    SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, MSG, SWP_NOSIZE,
-    SWP_NOZORDER, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+    CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
+    KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
 };
 
 lazy_static! {
@@ -169,24 +168,9 @@ unsafe extern "system" fn keyboard_hook_proc(
                                 let _ =
                                     sender.send(path_selection.as_ref().map(|ps| ps.get_info()));
 
-                                // Set window position to cursor position
-                                let hwnd = FindWindowW(
-                                    None,
-                                    PCWSTR::from_raw(
-                                        "Pathte\0".encode_utf16().collect::<Vec<u16>>().as_ptr(),
-                                    ),
-                                );
-                                let mut cursor_pos = POINT::default();
-                                GetCursorPos(&mut cursor_pos);
-                                SetWindowPos(
-                                    hwnd,
-                                    HWND_TOPMOST,
-                                    cursor_pos.x,
-                                    cursor_pos.y,
-                                    0,
-                                    0,
-                                    SWP_NOSIZE | SWP_NOZORDER,
-                                );
+                                if let Ok(hwnd) = win_api::find_app_window() {
+                                    win_api::move_window_to_cursor(hwnd).unwrap();
+                                }
 
                                 return LRESULT(1); // Prevent the default Ctrl+V behavior
                             }
