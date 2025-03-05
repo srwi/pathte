@@ -22,7 +22,6 @@ unsafe impl Send for PathSelection {}
 impl PathSelection {
     pub fn new(raw_path: String) -> Option<Self> {
         let path = PathSelection::get_initial_path(raw_path)?;
-        let initial_path_type = path.get_type();
 
         let options = vec![path.to_windows(), path.to_unix(), path.to_wsl()];
         let ok_options: Vec<Box<dyn Path>> = options
@@ -31,6 +30,12 @@ impl PathSelection {
             .flatten()
             .collect();
 
+        if ok_options.len() == 1 {
+            // If there is only one option, there is nothing to select
+            return None;
+        }
+
+        let initial_path_type = path.get_type();
         let initial_selection = ok_options
             .iter()
             .position(|x| x.get_type() == initial_path_type)
