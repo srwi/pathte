@@ -2,28 +2,22 @@ name: Rust Tests
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
+    tags:
+      - '*'
   pull_request:
-    branches: [ main, master ]
-
-env:
-  CARGO_TERM_COLOR: always
+  workflow_dispatch:
 
 jobs:
+
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Run tests
+    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Checkout code
+        uses: actions/checkout@v2
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
@@ -39,10 +33,11 @@ jobs:
         run: cargo test --verbose
   
   check:
-    name: Check
-    runs-on: ubuntu-latest
+    name: Formatting and clippy
+    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v2
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1

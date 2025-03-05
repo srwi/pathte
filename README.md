@@ -16,7 +16,7 @@ When you press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste, Pathte checks if your clip
 | Format        | Example                   |
 |---------------|---------------------------|
 | Windows       | `C:\folder\file.txt`      |
-| Unix          | `C:/folder/file.txt`      |
+| Unix-like     | `C:/folder/file.txt`      |
 | WSL           | `/mnt/c/folder/file.txt`  |
 
 Whenever there is _no_ file path in your clipboard, Pathte will act like it's not even there.

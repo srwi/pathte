@@ -48,6 +48,9 @@ impl eframe::App for Pathte {
             .fade_out(true)
             .collapsible(false)
             .title_bar(false)
+            .max_size([2500.0, 80.0])
+            .auto_sized()
+            .hscroll(true)
             .fixed_pos((10.0, 10.0))
             .resizable(false)
             .show(ctx, |ui| {
@@ -79,7 +82,7 @@ fn main() {
         viewport: egui::ViewportBuilder::default()
             .with_decorations(false)
             .with_taskbar(false)
-            .with_inner_size((1000.0, 300.0))
+            .with_inner_size((2560.0, 100.0))
             .with_position((100000.0, 100000.0))
             .with_transparent(true)
             .with_always_on_top(),
