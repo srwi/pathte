@@ -1,13 +1,18 @@
 [package]
 name = "pathte"
-version = "0.1.0"
+description = "Path-aware pasting in Windows"
+license = "MIT"
+authors = ["Stephan Rumswinkel"]
+repository = "https://github.com/srwi/pathte"
+readme = "README.md"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
-eframe = "0.29.1"
-tray-icon = "0.19.2"
-clipboard-win = "4.5"
+eframe = "0.31.1"
+tray-icon = "0.20.1"
+clipboard-win = "5.4.0"
 windows = { version = "0.48", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
 lazy_static = "1.5.0"
 regex = "1.11.1"
-image = "0.24"
+image = "0.25.6"

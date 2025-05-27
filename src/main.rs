@@ -14,6 +14,7 @@ use std::sync::{
     mpsc::{channel, Receiver, Sender},
     Mutex,
 };
+use std::time::{Duration, Instant};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_SHIFT, VK_V,
 };
@@ -29,6 +30,7 @@ static APP_NAME: &str = "Pathte";
 struct Pathte {
     signal_receiver: Receiver<Option<PathSelectionInfo>>,
     current_path_selection_info: Option<PathSelectionInfo>,
+    last_interaction: Instant,
 }
 
 impl eframe::App for Pathte {
@@ -37,10 +39,17 @@ impl eframe::App for Pathte {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
+        // Sending a viewport command on every update prevents egui from using reactive mode.
+        // To still be able to save cpu usage, we only send the command if there has been a recent interaction.
+        if self.last_interaction.elapsed() < Duration::from_secs(1)
+            || self.current_path_selection_info.is_some()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
+        }
 
         if let Ok(path_selection_info) = self.signal_receiver.try_recv() {
             self.current_path_selection_info = path_selection_info;
+            self.last_interaction = Instant::now();
         }
 
         Window::new(APP_NAME)
@@ -95,6 +104,7 @@ fn main() {
             Ok(Box::new(Pathte {
                 signal_receiver: gui_receiver,
                 current_path_selection_info: None,
+                last_interaction: Instant::now(),
             }))
         }),
     );
